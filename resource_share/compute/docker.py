@@ -5,14 +5,31 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .base import ComputeBackend, InstanceHandle, WorkloadSpec
+from ..ports.compute import (
+    CREATED,
+    ERROR,
+    MISSING,
+    RUNNING,
+    STOPPED,
+    AccessGrant,
+    ComputePort,
+    InstanceHandle,
+    WorkloadSpec,
+)
+
+_DOCKER_STATUS = {
+    "created": CREATED,
+    "running": RUNNING,
+    "paused": STOPPED,
+    "restarting": RUNNING,
+    "exited": STOPPED,
+    "dead": ERROR,
+    "removing": STOPPED,
+}
 
 
-class DockerComputeBackend(ComputeBackend):
-    """Optional adapter. Maps WorkloadSpec to a Docker container with CPU/RAM limits.
-
-    The rest of the app never imports the Docker SDK; this backend uses the CLI.
-    """
+class DockerComputeBackend(ComputePort):
+    """Optional adapter. Maps WorkloadSpec to a container. Core never imports Docker."""
 
     name = "docker"
 
@@ -70,13 +87,19 @@ class DockerComputeBackend(ComputeBackend):
             json.dumps({"container_id": native_id, "name": name}, indent=2),
             encoding="utf-8",
         )
+        grant = AccessGrant(
+            method="workspace",
+            summary="Isolated compute instance created",
+            location=str(disk_dir),
+            instructions="Use the shared volume folder. Shell access is runtime-specific and stays in adapter details.",
+        )
         return InstanceHandle(
             instance_id=vm_dir.name,
-            backend=self.name,
+            runtime=self.name,
             native_id=native_id,
-            status="created",
+            status=CREATED,
             workspace=str(vm_dir),
-            connection={"kind": "docker", "container": name, "mount": str(disk_dir)},
+            connection=grant.as_dict(),
             extra={"name": name},
         )
 
@@ -88,7 +111,7 @@ class DockerComputeBackend(ComputeBackend):
         )
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or "docker start failed.")
-        handle.status = "running"
+        handle.status = RUNNING
         return handle
 
     def stop(self, handle: InstanceHandle) -> InstanceHandle:
@@ -97,7 +120,7 @@ class DockerComputeBackend(ComputeBackend):
             capture_output=True,
             text=True,
         )
-        handle.status = "stopped"
+        handle.status = STOPPED
         return handle
 
     def status(self, handle: InstanceHandle) -> InstanceHandle:
@@ -106,18 +129,22 @@ class DockerComputeBackend(ComputeBackend):
             capture_output=True,
             text=True,
         )
-        handle.status = result.stdout.strip() if result.returncode == 0 else "missing"
+        if result.returncode != 0:
+            handle.status = MISSING
+            return handle
+        handle.status = _DOCKER_STATUS.get(result.stdout.strip().lower(), ERROR)
         return handle
 
-    def attach(self, handle: InstanceHandle, consumer_user: str) -> dict:
+    def attach(self, handle: InstanceHandle, consumer_user: str) -> AccessGrant:
         name = handle.extra.get("name", handle.native_id)
-        return {
-            "kind": "docker",
-            "container": name,
-            "exec": f"docker exec -it {name} sh",
-            "mount": str(Path(handle.workspace) / "virtual-disk"),
-            "consumer": consumer_user,
-        }
+        disk = Path(handle.workspace) / "virtual-disk"
+        return AccessGrant(
+            method="shell",
+            summary=f"Attached as {consumer_user}",
+            location=str(disk),
+            instructions="Use the shared volume folder. Adapter shell commands stay private to this runtime.",
+            details={"container": name, "exec": f"docker exec -it {name} sh"},
+        )
 
     def destroy(self, handle: InstanceHandle) -> None:
         self.stop(handle)

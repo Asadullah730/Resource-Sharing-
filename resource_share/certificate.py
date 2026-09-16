@@ -51,7 +51,6 @@ def issue_certificate(
     allocated: ResourceSpec,
     issued_at: str,
     expires_at: str,
-    backend: str,
     secret: bytes,
 ) -> ShareCertificate:
     draft = ShareCertificate(
@@ -67,7 +66,6 @@ def issue_certificate(
         expires_at=expires_at,
         fingerprint="",
         signature="",
-        backend=backend,
     )
     payload = draft.payload_for_hash()
     draft.fingerprint = fingerprint_payload(payload)
@@ -125,5 +123,4 @@ def certificate_from_dict(data: dict) -> ShareCertificate:
         expires_at=data["expires_at"],
         fingerprint=data["fingerprint"],
         signature=data["signature"],
-        backend=data.get("backend", "local"),
     )

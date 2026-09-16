@@ -4,16 +4,21 @@ import json
 import time
 from pathlib import Path
 
-from .base import ComputeBackend, InstanceHandle, WorkloadSpec
+from ..ports.compute import (
+    CREATED,
+    MISSING,
+    RUNNING,
+    STOPPED,
+    AccessGrant,
+    ComputePort,
+    InstanceHandle,
+    WorkloadSpec,
+    coerce_status,
+)
 
 
-class LocalComputeBackend(ComputeBackend):
-    """Always-available backend: a virtual machine represented as an isolated
-    workspace, resource envelope, and run-state file.
-
-    This is the default so the product works on Windows without Docker or a
-    cluster. Docker and Kubernetes adapters implement the same contract.
-    """
+class LocalComputeBackend(ComputePort):
+    """Default runtime: isolated workspace. No cluster or container engine required."""
 
     name = "local"
 
@@ -22,7 +27,7 @@ class LocalComputeBackend(ComputeBackend):
         self.instances_root.mkdir(parents=True, exist_ok=True)
 
     def available(self) -> tuple[bool, str]:
-        return True, "Local virtual-machine sandbox is ready."
+        return True, "Local isolated runtime is ready."
 
     def create_instance(self, workload: WorkloadSpec) -> InstanceHandle:
         vm_dir = Path(workload.workspace)
@@ -30,7 +35,7 @@ class LocalComputeBackend(ComputeBackend):
         disk_dir = vm_dir / "virtual-disk"
         disk_dir.mkdir(exist_ok=True)
         (disk_dir / "README.txt").write_text(
-            "This folder is the consumer-facing virtual disk for the shared VM.\n"
+            "This folder is the consumer-facing virtual disk for the shared instance.\n"
             f"Quota: {workload.spec.disk_gb:g} GB\n",
             encoding="utf-8",
         )
@@ -41,42 +46,53 @@ class LocalComputeBackend(ComputeBackend):
             "memory_gb": workload.spec.ram_gb,
             "disk_gb": workload.spec.disk_gb,
             "created_epoch": time.time(),
-            "state": "created",
+            "state": CREATED,
             "labels": workload.labels,
         }
         (vm_dir / "machine.json").write_text(json.dumps(machine, indent=2), encoding="utf-8")
         (vm_dir / "console.log").write_text(
-            f"[local-vm] created {workload.name} with {workload.spec.label()}\n",
+            f"[local-runtime] created {workload.name} with {workload.spec.label()}\n",
             encoding="utf-8",
+        )
+        grant = AccessGrant(
+            method="workspace",
+            summary="Isolated workspace created",
+            location=str(disk_dir),
+            instructions="Use the virtual-disk folder as the shared volume for this instance.",
         )
         return InstanceHandle(
             instance_id=vm_dir.name,
-            backend=self.name,
+            runtime=self.name,
             native_id=str(vm_dir),
-            status="created",
+            status=CREATED,
             workspace=str(vm_dir),
-            connection={"kind": "workspace", "path": str(disk_dir)},
+            connection=grant.as_dict(),
             extra={"machine_file": str(vm_dir / "machine.json")},
         )
 
     def start(self, handle: InstanceHandle) -> InstanceHandle:
         vm_dir = Path(handle.workspace)
         machine_path = vm_dir / "machine.json"
+        if not machine_path.exists():
+            handle.status = MISSING
+            return handle
         machine = json.loads(machine_path.read_text(encoding="utf-8"))
-        machine["state"] = "running"
+        machine["state"] = RUNNING
         machine["started_epoch"] = time.time()
         machine_path.write_text(json.dumps(machine, indent=2), encoding="utf-8")
         (vm_dir / "console.log").write_text(
             (vm_dir / "console.log").read_text(encoding="utf-8")
-            + f"[local-vm] started at {time.strftime('%Y-%m-%d %H:%M:%S')}\n",
+            + f"[local-runtime] started at {time.strftime('%Y-%m-%d %H:%M:%S')}\n",
             encoding="utf-8",
         )
-        handle.status = "running"
-        handle.connection = {
-            "kind": "workspace",
-            "path": str(vm_dir / "virtual-disk"),
-            "console": str(vm_dir / "console.log"),
-        }
+        handle.status = RUNNING
+        handle.connection = AccessGrant(
+            method="workspace",
+            summary="Isolated workspace is running",
+            location=str(vm_dir / "virtual-disk"),
+            instructions="Use the virtual-disk folder as the shared volume for this instance.",
+            details={"console": str(vm_dir / "console.log")},
+        ).as_dict()
         return handle
 
     def stop(self, handle: InstanceHandle) -> InstanceHandle:
@@ -84,38 +100,35 @@ class LocalComputeBackend(ComputeBackend):
         machine_path = vm_dir / "machine.json"
         if machine_path.exists():
             machine = json.loads(machine_path.read_text(encoding="utf-8"))
-            machine["state"] = "stopped"
+            machine["state"] = STOPPED
             machine_path.write_text(json.dumps(machine, indent=2), encoding="utf-8")
-        handle.status = "stopped"
+        handle.status = STOPPED
         return handle
 
     def status(self, handle: InstanceHandle) -> InstanceHandle:
         machine_path = Path(handle.workspace) / "machine.json"
         if not machine_path.exists():
-            handle.status = "missing"
+            handle.status = MISSING
             return handle
         machine = json.loads(machine_path.read_text(encoding="utf-8"))
-        handle.status = machine.get("state", "unknown")
+        handle.status = coerce_status(machine.get("state"))
         return handle
 
-    def attach(self, handle: InstanceHandle, consumer_user: str) -> dict:
+    def attach(self, handle: InstanceHandle, consumer_user: str) -> AccessGrant:
         disk = Path(handle.workspace) / "virtual-disk"
+        disk.mkdir(parents=True, exist_ok=True)
         session_note = disk / f"session-{consumer_user}.txt"
         session_note.write_text(
             f"Attached as {consumer_user}\nWorkspace: {disk}\n",
             encoding="utf-8",
         )
-        return {
-            "kind": "workspace",
-            "path": str(disk),
-            "console": str(Path(handle.workspace) / "console.log"),
-            "consumer": consumer_user,
-            "instructions": (
-                "This VM is a local sandbox. Use the virtual-disk folder as the "
-                "shared volume. Swap RESOURCE_SHARE_BACKEND to docker or kubernetes "
-                "for container/cluster isolation."
-            ),
-        }
+        return AccessGrant(
+            method="workspace",
+            summary=f"Attached as {consumer_user}",
+            location=str(disk),
+            instructions="Open the shared volume folder. This attach contract is the same for every runtime.",
+            details={"console": str(Path(handle.workspace) / "console.log")},
+        )
 
     def destroy(self, handle: InstanceHandle) -> None:
         self.stop(handle)

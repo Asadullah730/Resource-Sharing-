@@ -6,10 +6,11 @@ from typing import Any
 
 from .certificate import certificate_from_dict, encode_pem
 from .models import AccessSession, InstanceRecord, ResourceSpec, ShareCertificate, ShareOffer
+from .ports.registry import RegistryPort
 
 
-class FileRegistry:
-    """JSON file registry. Shared folder can later be a network drive or object store."""
+class FileRegistry(RegistryPort):
+    """File adapter for RegistryPort. Not part of the Kubernetes runtime."""
 
     def __init__(self, root: Path):
         self.root = root

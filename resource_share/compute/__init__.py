@@ -1,3 +1,4 @@
-from .factory import create_backend, selected_backend_name
+"""Compute runtime adapters.
 
-__all__ = ["create_backend", "selected_backend_name"]
+Application core must not import this package. Wire a runtime in bootstrap.
+"""

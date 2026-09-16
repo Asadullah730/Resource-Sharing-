@@ -120,13 +120,14 @@ class ShareCertificate:
     expires_at: str
     fingerprint: str
     signature: str
-    backend: str
 
     def payload_for_hash(self) -> dict[str, Any]:
-        """Fields covered by the SHA fingerprint (signature excluded)."""
+        """Fields covered by the SHA fingerprint (signature excluded).
+
+        Runtime names (local, docker, kubernetes) are not part of the ticket.
+        """
         return {
             "allocated": self.allocated.as_dict(),
-            "backend": self.backend,
             "expires_at": self.expires_at,
             "instance_id": self.instance_id,
             "issued_at": self.issued_at,

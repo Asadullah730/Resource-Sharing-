@@ -9,11 +9,8 @@ from .certificate import (
     decode_pem,
     encode_pem,
     issue_certificate,
-    load_or_create_issuer_secret,
     verify_certificate,
 )
-from .compute.base import InstanceHandle, WorkloadSpec
-from .compute.factory import create_backend, selected_backend_name
 from .inventory import collect_host_inventory, parse_quantity
 from .matching import assert_not_expired, assert_resources_fit
 from .models import (
@@ -26,24 +23,44 @@ from .models import (
     iso,
     utc_now,
 )
-from .registry import FileRegistry
+from .ports.compute import (
+    INACTIVE_STATUSES,
+    STARTABLE_STATUSES,
+    AccessGrant,
+    ComputePort,
+    InstanceHandle,
+    WorkloadSpec,
+)
+from .ports.registry import RegistryPort
 
 
 class ResourceShareService:
-    def __init__(self, data_root: Path | None = None, backend_name: str | None = None):
-        self.data_root = data_root or Path(__file__).resolve().parent.parent / "data"
-        self.data_root.mkdir(parents=True, exist_ok=True)
-        self.registry = FileRegistry(self.data_root)
-        self.secret = load_or_create_issuer_secret(self.data_root / ".issuer_secret")
-        self.backend_name = backend_name or selected_backend_name()
-        self.backend = create_backend(self.data_root / "vm-runtime", self.backend_name)
+    """Application use-cases. Depends only on ports, never on Kubernetes or Docker."""
+
+    def __init__(
+        self,
+        data_root: Path,
+        registry: RegistryPort,
+        compute: ComputePort,
+        secret: bytes,
+    ):
+        self.data_root = data_root
+        self.registry = registry
+        self.compute = compute
+        self.secret = secret
+
+    def runtime_status(self) -> tuple[str, bool, str]:
+        ok, reason = self.compute.available()
+        return self.compute.name, ok, reason
 
     def backend_status(self) -> tuple[str, bool, str]:
-        ok, reason = self.backend.available()
-        return self.backend.name, ok, reason
+        return self.runtime_status()
 
     def inventory(self, cpu_interval: float = 0.2) -> HostInventory:
         return collect_host_inventory(cpu_interval=cpu_interval)
+
+    def get_offer(self, offer_id: str) -> ShareOffer | None:
+        return self.registry.get_offer(offer_id)
 
     def share_resources(
         self,
@@ -84,8 +101,9 @@ class ResourceShareService:
                 "purpose": purpose.strip() or "shared-vm",
             },
         )
-        handle = self.backend.create_instance(workload)
-        handle = self.backend.start(handle)
+        handle = self.compute.create_instance(workload)
+        handle = self.compute.start(handle)
+        grant = AccessGrant.from_dict(handle.connection)
 
         cert = issue_certificate(
             offer_id=offer_id,
@@ -97,7 +115,6 @@ class ResourceShareService:
             allocated=allocated,
             issued_at=iso(created),
             expires_at=iso(expires),
-            backend=self.backend.name,
             secret=self.secret,
         )
         json_path, pem_path = self.registry.save_certificate(cert)
@@ -113,7 +130,7 @@ class ResourceShareService:
             expires_at=iso(expires),
             fingerprint=cert.fingerprint,
             instance_id=instance_id,
-            backend=self.backend.name,
+            backend=self.compute.name,
             status="active",
         )
         self.registry.save_offer(offer)
@@ -122,7 +139,7 @@ class ResourceShareService:
             instance_id=instance_id,
             offer_id=offer_id,
             fingerprint=cert.fingerprint,
-            backend=self.backend.name,
+            backend=self.compute.name,
             name=workload.name,
             spec=allocated,
             status=handle.status,
@@ -141,7 +158,7 @@ class ResourceShareService:
             "pem_path": str(pem_path),
             "json_path": str(json_path),
             "instance": record.as_dict(),
-            "connection": handle.connection,
+            "connection": grant.as_dict(),
             "guest": guest,
         }
 
@@ -170,11 +187,11 @@ class ResourceShareService:
             raise ValueError("Certificate is valid but the virtual machine record is missing.")
 
         handle = _handle_from_record(record)
-        handle = self.backend.status(handle)
-        if handle.status in {"created", "stopped", "pending"}:
-            handle = self.backend.start(handle)
-        live = self.backend.status(handle)
-        connection = self.backend.attach(live, consumer_user.strip() or "guest")
+        handle = self.compute.status(handle)
+        if handle.status in STARTABLE_STATUSES:
+            handle = self.compute.start(handle)
+        live = self.compute.status(handle)
+        grant = self.compute.attach(live, consumer_user.strip() or "guest")
 
         record.status = live.status
         record.consumer_user = consumer_user.strip() or "guest"
@@ -189,7 +206,7 @@ class ResourceShareService:
             requested=requested,
             attached_at=iso(utc_now()),
             workspace=record.workspace,
-            connection=connection,
+            connection=grant.as_dict(),
         )
         self.registry.save_session(session)
         return {
@@ -198,16 +215,24 @@ class ResourceShareService:
             "allocated": cert.allocated.as_dict(),
             "requested": requested.as_dict(),
             "sha_key": cert.fingerprint,
-            "connection": connection,
+            "connection": grant.as_dict(),
         }
 
     def list_instances(self) -> list[InstanceRecord]:
-        return self.registry.list_instances()
+        records = []
+        for record in self.registry.list_instances():
+            handle = self.compute.status(_handle_from_record(record))
+            if handle.status != record.status:
+                record.status = handle.status
+                record.handle = _handle_to_dict(handle)
+                self.registry.save_instance(record)
+            records.append(record)
+        return records
 
     def reserved_spec(self) -> ResourceSpec:
         cpu = ram = disk = 0.0
         for record in self.list_instances():
-            if record.status in {"stopped", "missing", "destroyed"}:
+            if record.status in INACTIVE_STATUSES:
                 continue
             cpu += record.spec.cpu_cores
             ram += record.spec.ram_gb
@@ -228,7 +253,7 @@ class ResourceShareService:
         guest = {
             "role": "guest-vm",
             "hostname": record.instance_id,
-            "os": f"Resource Share Guest ({record.backend})",
+            "os": "Resource Share Guest",
             "architecture": "virtual",
             "ip": "10.0.0.2",
             "vcpu": record.spec.cpu_cores,
@@ -241,8 +266,10 @@ class ResourceShareService:
             "target_user": target_user,
             "purpose": purpose,
             "fingerprint": record.fingerprint,
+            "runtime": record.backend,
         }
         path = workspace / "guest-system.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(guest, indent=2), encoding="utf-8")
         guest["path"] = str(path)
         return guest
@@ -288,7 +315,8 @@ class ResourceShareService:
 def _handle_to_dict(handle: InstanceHandle) -> dict:
     return {
         "instance_id": handle.instance_id,
-        "backend": handle.backend,
+        "runtime": handle.runtime,
+        "backend": handle.runtime,
         "native_id": handle.native_id,
         "status": handle.status,
         "workspace": handle.workspace,
@@ -301,7 +329,7 @@ def _handle_from_record(record: InstanceRecord) -> InstanceHandle:
     raw = record.handle or {}
     return InstanceHandle(
         instance_id=record.instance_id,
-        backend=record.backend,
+        runtime=str(raw.get("runtime") or raw.get("backend") or record.backend),
         native_id=raw.get("native_id", record.instance_id),
         status=record.status,
         workspace=record.workspace,

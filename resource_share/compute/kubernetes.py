@@ -5,7 +5,18 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .base import ComputeBackend, InstanceHandle, WorkloadSpec
+from ..ports.compute import (
+    CREATED,
+    ERROR,
+    MISSING,
+    PENDING,
+    RUNNING,
+    STOPPED,
+    AccessGrant,
+    ComputePort,
+    InstanceHandle,
+    WorkloadSpec,
+)
 
 _POD_TEMPLATE = """apiVersion: v1
 kind: Pod
@@ -36,13 +47,17 @@ spec:
         sizeLimit: {disk}
 """
 
+_PHASE_STATUS = {
+    "Pending": PENDING,
+    "Running": RUNNING,
+    "Succeeded": STOPPED,
+    "Failed": ERROR,
+    "Unknown": MISSING,
+}
 
-class KubernetesComputeBackend(ComputeBackend):
-    """Optional adapter. Translates WorkloadSpec into a Pod and applies it with kubectl.
 
-    Kubernetes is one compute target, not the application architecture. Switching
-    RESOURCE_SHARE_BACKEND away from kubernetes removes all cluster coupling.
-    """
+class KubernetesComputeBackend(ComputePort):
+    """Optional adapter. Kubernetes is a compute target, not the application architecture."""
 
     name = "kubernetes"
 
@@ -94,22 +109,23 @@ class KubernetesComputeBackend(ComputeBackend):
             json.dumps({"pod": name, "namespace": self.namespace}, indent=2),
             encoding="utf-8",
         )
+        grant = AccessGrant(
+            method="workspace",
+            summary="Isolated compute instance created",
+            location=str(vm_dir),
+            instructions="Use the shared instance location. Cluster commands stay private to this runtime.",
+        )
         return InstanceHandle(
             instance_id=vm_dir.name,
-            backend=self.name,
+            runtime=self.name,
             native_id=name,
-            status="created",
+            status=CREATED,
             workspace=str(vm_dir),
-            connection={
-                "kind": "kubernetes",
-                "pod": name,
-                "namespace": self.namespace,
-            },
+            connection=grant.as_dict(),
             extra={"pod": name, "namespace": self.namespace},
         )
 
     def start(self, handle: InstanceHandle) -> InstanceHandle:
-        # A created Pod is already scheduled; "start" waits until Running.
         result = subprocess.run(
             [
                 "kubectl",
@@ -123,7 +139,7 @@ class KubernetesComputeBackend(ComputeBackend):
             capture_output=True,
             text=True,
         )
-        handle.status = "running" if result.returncode == 0 else "pending"
+        handle.status = RUNNING if result.returncode == 0 else PENDING
         return handle
 
     def stop(self, handle: InstanceHandle) -> InstanceHandle:
@@ -140,7 +156,7 @@ class KubernetesComputeBackend(ComputeBackend):
             capture_output=True,
             text=True,
         )
-        handle.status = "stopped"
+        handle.status = STOPPED
         return handle
 
     def status(self, handle: InstanceHandle) -> InstanceHandle:
@@ -158,19 +174,26 @@ class KubernetesComputeBackend(ComputeBackend):
             capture_output=True,
             text=True,
         )
-        handle.status = result.stdout.strip() if result.returncode == 0 else "missing"
+        if result.returncode != 0:
+            handle.status = MISSING
+            return handle
+        handle.status = _PHASE_STATUS.get(result.stdout.strip(), MISSING)
         return handle
 
-    def attach(self, handle: InstanceHandle, consumer_user: str) -> dict:
+    def attach(self, handle: InstanceHandle, consumer_user: str) -> AccessGrant:
         ns = handle.extra.get("namespace", self.namespace)
         pod = handle.native_id
-        return {
-            "kind": "kubernetes",
-            "pod": pod,
-            "namespace": ns,
-            "exec": f"kubectl exec -it -n {ns} {pod} -- sh",
-            "consumer": consumer_user,
-        }
+        return AccessGrant(
+            method="shell",
+            summary=f"Attached as {consumer_user}",
+            location=handle.workspace,
+            instructions="Use the shared instance location. Adapter shell commands stay private to this runtime.",
+            details={
+                "pod": pod,
+                "namespace": ns,
+                "exec": f"kubectl exec -it -n {ns} {pod} -- sh",
+            },
+        )
 
     def destroy(self, handle: InstanceHandle) -> None:
         self.stop(handle)

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-import json
 import webbrowser
 from pathlib import Path
 
 import customtkinter as ctk
 
+from .bootstrap import build_service
 from .models import HostInventory
-from .service import ResourceShareService
+from .ports.compute import AccessGrant, MISSING, RUNNING, ERROR
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -57,7 +57,7 @@ class ResourceShareApp(ctk.CTk):
         self.minsize(800, 560)
         self.configure(fg_color=BG)
 
-        self.service = ResourceShareService()
+        self.service = build_service()
         self.host: HostInventory | None = None
         self._last_pem_path: str | None = None
         self._refresh_job: str | None = None
@@ -104,7 +104,7 @@ class ResourceShareApp(ctk.CTk):
         ).pack(anchor="w")
         ctk.CTkLabel(
             titles,
-            text="Share CPU, RAM, and disk with a SHA certificate  ·  Kubernetes-agnostic VM",
+            text="Share CPU, RAM, and disk with a SHA certificate  ·  runtime-agnostic",
             font=ctk.CTkFont(size=13),
             text_color=MUTED,
         ).pack(anchor="w")
@@ -518,7 +518,7 @@ class ResourceShareApp(ctk.CTk):
             self.consumer_status.configure(text=str(exc), text_color=ERR)
             return
 
-        connection = json.dumps(result["connection"], indent=2)
+        grant = AccessGrant.from_dict(result["connection"])
         allocated = result["allocated"]
         details = (
             f"ATTACHED TO GUEST VM  [{result['instance']['status']}]\n"
@@ -528,16 +528,16 @@ class ResourceShareApp(ctk.CTk):
             f"  Guest Disk: {allocated['disk_gb']:g} GB\n"
             f"  You requested: {result['requested']}\n"
             f"  Workspace: {result['instance']['workspace']}\n\n"
-            f"CONNECTION\n{connection}"
+            f"ACCESS\n{grant.display_text()}"
         )
         self._set_text(self.consumer_result, details)
         self.consumer_status.configure(
             text="Certificate verified. You are attached to the shared virtual machine.",
             text_color=OK,
         )
-        workspace = result["connection"].get("path") or result["instance"]["workspace"]
+        location = grant.location or result["instance"]["workspace"]
         try:
-            webbrowser.open(Path(workspace).as_uri())
+            webbrowser.open(Path(location).as_uri())
         except Exception:
             pass
         self.refresh_vms()
@@ -556,7 +556,7 @@ class ResourceShareApp(ctk.CTk):
         for record in records:
             card = ctk.CTkFrame(self.vm_container, fg_color=CARD_ALT, corner_radius=12)
             card.pack(fill="x", pady=6, padx=4)
-            status_color = OK if record.status == "running" else WARN
+            status_color = OK if record.status == RUNNING else (ERR if record.status in {MISSING, ERROR} else WARN)
             top = ctk.CTkFrame(card, fg_color="transparent")
             top.pack(fill="x", padx=14, pady=(12, 4))
             ctk.CTkLabel(
@@ -567,7 +567,7 @@ class ResourceShareApp(ctk.CTk):
                 corner_radius=8, font=ctk.CTkFont(size=12, weight="bold"),
             ).pack(side="right")
 
-            offer = self.service.registry.get_offer(record.offer_id)
+            offer = self.service.get_offer(record.offer_id)
             guest_line = (
                 f"Guest VM: {record.spec.label()}\n"
                 f"This is the virtual machine envelope, not the physical host."
