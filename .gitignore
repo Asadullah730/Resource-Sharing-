@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+build/
+dist/
+config.bat
+node_modules

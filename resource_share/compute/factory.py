@@ -9,7 +9,7 @@ RUNTIMES = ("local", "docker", "kubernetes")
 
 
 def selected_backend_name() -> str:
-    name = os.environ.get("RESOURCE_SHARE_BACKEND", "local").strip().lower()
+    name = os.environ.get("RESOURCE_SHARE_BACKEND", "kubernetes").strip().lower()
     if name not in RUNTIMES:
         raise ValueError(
             f"Unknown RESOURCE_SHARE_BACKEND={name!r}. Choose one of: {', '.join(RUNTIMES)}"
