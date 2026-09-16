@@ -6,6 +6,7 @@ service, certificates, matching, and UI depend on ports, not Kubernetes.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from .certificate import load_or_create_issuer_secret
@@ -14,6 +15,8 @@ from .service import ResourceShareService
 
 
 def default_data_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "data"
     return Path(__file__).resolve().parent.parent / "data"
 
 

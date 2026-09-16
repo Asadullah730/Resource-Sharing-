@@ -126,59 +126,74 @@ class KubernetesComputeBackend(ComputePort):
         )
 
     def start(self, handle: InstanceHandle) -> InstanceHandle:
-        result = subprocess.run(
-            [
-                "kubectl",
-                "wait",
-                "--for=condition=Ready",
-                f"pod/{handle.native_id}",
-                "-n",
-                handle.extra.get("namespace", self.namespace),
-                "--timeout=60s",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        handle.status = RUNNING if result.returncode == 0 else PENDING
+        try:
+            result = subprocess.run(
+                [
+                    "kubectl",
+                    "wait",
+                    "--for=condition=Ready",
+                    f"pod/{handle.native_id}",
+                    "-n",
+                    handle.extra.get("namespace", self.namespace),
+                    "--timeout=60s",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=65,
+            )
+            handle.status = RUNNING if result.returncode == 0 else PENDING
+        except (subprocess.TimeoutExpired, Exception):
+            handle.status = ERROR
         return handle
 
     def stop(self, handle: InstanceHandle) -> InstanceHandle:
-        subprocess.run(
-            [
-                "kubectl",
-                "delete",
-                "pod",
-                handle.native_id,
-                "-n",
-                handle.extra.get("namespace", self.namespace),
-                "--ignore-not-found=true",
-            ],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            subprocess.run(
+                [
+                    "kubectl",
+                    "--request-timeout=5s",
+                    "delete",
+                    "pod",
+                    handle.native_id,
+                    "-n",
+                    handle.extra.get("namespace", self.namespace),
+                    "--ignore-not-found=true",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (subprocess.TimeoutExpired, Exception):
+            pass
         handle.status = STOPPED
         return handle
 
     def status(self, handle: InstanceHandle) -> InstanceHandle:
-        result = subprocess.run(
-            [
-                "kubectl",
-                "get",
-                "pod",
-                handle.native_id,
-                "-n",
-                handle.extra.get("namespace", self.namespace),
-                "-o",
-                "jsonpath={.status.phase}",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
+        try:
+            result = subprocess.run(
+                [
+                    "kubectl",
+                    "--request-timeout=5s",
+                    "get",
+                    "pod",
+                    handle.native_id,
+                    "-n",
+                    handle.extra.get("namespace", self.namespace),
+                    "-o",
+                    "jsonpath={.status.phase}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=8,
+            )
+            if result.returncode != 0:
+                handle.status = MISSING
+                return handle
+            handle.status = _PHASE_STATUS.get(result.stdout.strip(), MISSING)
+            return handle
+        except (subprocess.TimeoutExpired, Exception):
             handle.status = MISSING
             return handle
-        handle.status = _PHASE_STATUS.get(result.stdout.strip(), MISSING)
-        return handle
 
     def attach(self, handle: InstanceHandle, consumer_user: str) -> AccessGrant:
         ns = handle.extra.get("namespace", self.namespace)
