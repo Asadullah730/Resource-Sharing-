@@ -141,6 +141,10 @@ class ComputePort(ABC):
     def destroy(self, handle: InstanceHandle) -> None:
         ...
 
+    def execute(self, handle: InstanceHandle, command: str) -> str:
+        """Run a command inside the workload envelope."""
+        return "Command execution not supported by this compute adapter."
+
 
 # Backward-compatible name used by older adapter imports.
 ComputeBackend = ComputePort

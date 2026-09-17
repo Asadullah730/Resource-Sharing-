@@ -3,7 +3,15 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = []
 binaries = []
-hiddenimports = ['resource_share.compute.local', 'resource_share.compute.docker', 'resource_share.compute.kubernetes']
+hiddenimports = [
+    'resource_share.compute.local',
+    'resource_share.compute.docker',
+    'resource_share.compute.kubernetes',
+    'resource_share.network',
+    'resource_share.network.server',
+    'resource_share.network.client',
+    'resource_share.network.tunnel',
+]
 tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 

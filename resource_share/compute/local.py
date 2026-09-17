@@ -132,3 +132,25 @@ class LocalComputeBackend(ComputePort):
 
     def destroy(self, handle: InstanceHandle) -> None:
         self.stop(handle)
+
+    def execute(self, handle: InstanceHandle, command: str) -> str:
+        import subprocess
+
+        vm_dir = Path(handle.workspace) / "virtual-disk"
+        try:
+            res = subprocess.run(
+                command,
+                shell=True,
+                cwd=str(vm_dir) if vm_dir.exists() else str(handle.workspace),
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            output = res.stdout
+            if res.stderr:
+                output += ("\n" if output else "") + res.stderr
+            return output or f"(completed with exit code {res.returncode})"
+        except subprocess.TimeoutExpired:
+            return "Execution timed out after 30 seconds."
+        except Exception as exc:
+            return f"Execution error: {exc}"

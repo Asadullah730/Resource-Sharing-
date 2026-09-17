@@ -75,6 +75,22 @@ class FileRegistry(RegistryPort):
         _write_json(path, session.as_dict())
         return path
 
+    def get_session(self, session_id: str) -> AccessSession | None:
+        path = self.sessions_dir / f"{session_id}.json"
+        if not path.exists():
+            return None
+        data = _read_json(path)
+        return AccessSession(
+            session_id=data["session_id"],
+            instance_id=data["instance_id"],
+            fingerprint=data["fingerprint"],
+            consumer_user=data["consumer_user"],
+            requested=ResourceSpec(**data["requested"]),
+            attached_at=data["attached_at"],
+            workspace=data["workspace"],
+            connection=data.get("connection", {}),
+        )
+
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -102,6 +118,7 @@ def _offer_from_dict(data: dict[str, Any]) -> ShareOffer:
         instance_id=data["instance_id"],
         backend=data["backend"],
         status=data.get("status", "offered"),
+        issuer_address=data.get("issuer_address", ""),
     )
 
 

@@ -23,15 +23,26 @@ def default_data_root() -> Path:
 def build_service(
     data_root: Path | None = None,
     runtime_name: str | None = None,
+    start_server: bool = True,
 ) -> ResourceShareService:
     root = data_root or default_data_root()
     root.mkdir(parents=True, exist_ok=True)
     from .compute.factory import create_backend, selected_backend_name
+    from .network.server import NetworkServerManager
+    from .network.tunnel import CloudflareTunnelManager
 
     runtime = runtime_name or selected_backend_name()
-    return ResourceShareService(
+    svc = ResourceShareService(
         data_root=root,
         registry=FileRegistry(root),
         compute=create_backend(root / "vm-runtime", runtime),
         secret=load_or_create_issuer_secret(root / ".issuer_secret"),
     )
+    svc.server_manager = NetworkServerManager(svc)
+    svc.tunnel_manager = CloudflareTunnelManager(root)
+    if start_server:
+        try:
+            svc.server_manager.start()
+        except Exception:
+            pass
+    return svc

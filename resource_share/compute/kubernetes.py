@@ -212,3 +212,18 @@ class KubernetesComputeBackend(ComputePort):
 
     def destroy(self, handle: InstanceHandle) -> None:
         self.stop(handle)
+
+    def execute(self, handle: InstanceHandle, command: str) -> str:
+        ns = handle.extra.get("namespace", self.namespace)
+        pod = handle.native_id
+        cmd = ["kubectl", "exec", "-n", ns, pod, "--", "sh", "-c", command]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            output = res.stdout
+            if res.stderr:
+                output += ("\n" if output else "") + res.stderr
+            return output or f"(command completed with exit code {res.returncode})"
+        except subprocess.TimeoutExpired:
+            return "Execution timed out after 30 seconds."
+        except Exception as exc:
+            return f"Execution error: {exc}"

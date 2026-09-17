@@ -72,7 +72,15 @@ class ResourceShareService:
         provider_user: str = "",
         purpose: str = "shared-vm",
         ttl_days: int = 7,
+        issuer_address: str = "",
     ) -> dict:
+        ok, reason = self.compute.available()
+        if not ok:
+            raise RuntimeError(
+                f"Cannot share resources: Kubernetes is required but not active ({reason}). "
+                "Please enable or start your Kubernetes cluster first."
+            )
+
         host = collect_host_inventory()
         allocated = ResourceSpec(
             cpu_cores=parse_quantity(cpu_text),
@@ -116,6 +124,7 @@ class ResourceShareService:
             issued_at=iso(created),
             expires_at=iso(expires),
             secret=self.secret,
+            issuer_address=issuer_address,
         )
         json_path, pem_path = self.registry.save_certificate(cert)
 
@@ -132,6 +141,7 @@ class ResourceShareService:
             instance_id=instance_id,
             backend=self.compute.name,
             status="active",
+            issuer_address=issuer_address,
         )
         self.registry.save_offer(offer)
 
@@ -217,6 +227,16 @@ class ResourceShareService:
             "sha_key": cert.fingerprint,
             "connection": grant.as_dict(),
         }
+
+    def execute_in_session(self, session_id: str, command: str) -> str:
+        session = getattr(self.registry, "get_session")(session_id) if hasattr(self.registry, "get_session") else None
+        if session is None:
+            raise ValueError(f"Session {session_id} not found.")
+        record = self.registry.get_instance(session.instance_id)
+        if record is None:
+            raise ValueError(f"Instance record for {session.instance_id} was not found.")
+        handle = _handle_from_record(record)
+        return self.compute.execute(handle, command)
 
     def list_instances(self) -> list[InstanceRecord]:
         records = []

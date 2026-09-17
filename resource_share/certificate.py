@@ -52,6 +52,7 @@ def issue_certificate(
     issued_at: str,
     expires_at: str,
     secret: bytes,
+    issuer_address: str = "",
 ) -> ShareCertificate:
     draft = ShareCertificate(
         version=CERT_VERSION,
@@ -66,6 +67,7 @@ def issue_certificate(
         expires_at=expires_at,
         fingerprint="",
         signature="",
+        issuer_address=issuer_address,
     )
     payload = draft.payload_for_hash()
     draft.fingerprint = fingerprint_payload(payload)
@@ -87,7 +89,8 @@ def encode_pem(cert: ShareCertificate) -> str:
     raw = _canonical_json(cert.as_dict())
     b64 = base64.b64encode(raw).decode("ascii")
     wrapped = "\n".join(b64[i : i + 64] for i in range(0, len(b64), 64))
-    return f"{CERT_BEGIN}\n{wrapped}\n{CERT_END}\nSHA-256 Fingerprint: {cert.fingerprint}\n"
+    addr_line = f"\nIssuer Address: {cert.issuer_address}" if cert.issuer_address else ""
+    return f"{CERT_BEGIN}\n{wrapped}\n{CERT_END}\nSHA-256 Fingerprint: {cert.fingerprint}{addr_line}\n"
 
 
 def decode_pem(text: str) -> ShareCertificate:
@@ -101,7 +104,15 @@ def decode_pem(text: str) -> ShareCertificate:
         payload = json.loads(base64.b64decode(body).decode("utf-8"))
     except (ValueError, json.JSONDecodeError) as exc:
         raise ValueError("Certificate body is not valid Base64 JSON.") from exc
-    return certificate_from_dict(payload)
+
+    cert = certificate_from_dict(payload)
+    # Check if Issuer Address was in trailer
+    for line in lines[end + 1 :]:
+        if line.lower().startswith("issuer address:"):
+            addr = line.split(":", 1)[1].strip()
+            if addr and not cert.issuer_address:
+                cert.issuer_address = addr
+    return cert
 
 
 def certificate_from_dict(data: dict) -> ShareCertificate:
@@ -123,4 +134,5 @@ def certificate_from_dict(data: dict) -> ShareCertificate:
         expires_at=data["expires_at"],
         fingerprint=data["fingerprint"],
         signature=data["signature"],
+        issuer_address=str(data.get("issuer_address", "")),
     )

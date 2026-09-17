@@ -98,6 +98,7 @@ class ShareOffer:
     instance_id: str
     backend: str
     status: str = "offered"
+    issuer_address: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -120,13 +121,14 @@ class ShareCertificate:
     expires_at: str
     fingerprint: str
     signature: str
+    issuer_address: str = ""
 
     def payload_for_hash(self) -> dict[str, Any]:
         """Fields covered by the SHA fingerprint (signature excluded).
 
         Runtime names (local, docker, kubernetes) are not part of the ticket.
         """
-        return {
+        payload = {
             "allocated": self.allocated.as_dict(),
             "expires_at": self.expires_at,
             "instance_id": self.instance_id,
@@ -138,11 +140,16 @@ class ShareCertificate:
             "target_user": self.target_user,
             "version": self.version,
         }
+        if self.issuer_address:
+            payload["issuer_address"] = self.issuer_address
+        return payload
 
     def as_dict(self) -> dict[str, Any]:
         data = self.payload_for_hash()
         data["fingerprint"] = self.fingerprint
         data["signature"] = self.signature
+        if self.issuer_address:
+            data["issuer_address"] = self.issuer_address
         return data
 
 
