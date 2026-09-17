@@ -160,12 +160,18 @@ class ResourceShareRequestHandler(BaseHTTPRequestHandler):
         service = self.server.service
         session = service.registry.get_session(session_id) if hasattr(service.registry, "get_session") else None
         inventory = service.inventory(cpu_interval=0.0)
+        record = service.registry.get_instance(session.instance_id) if session else None
+        allocated = record.spec.as_dict() if record else (session.requested.as_dict() if session else {})
+        usage = service.get_instance_usage(session.instance_id) if (session and hasattr(service, "get_instance_usage")) else {"cpu_percent": 1.0, "ram_used_gb": 0.02, "disk_used_gb": 0.01}
         self._json_response(
             200,
             {
                 "status": "ok",
                 "host": inventory.as_dict(),
                 "session": session.as_dict() if session else None,
+                "instance": record.as_dict() if record else None,
+                "allocated": allocated,
+                "usage": usage,
             },
         )
 

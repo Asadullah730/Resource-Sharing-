@@ -17,6 +17,7 @@ from ..ports.compute import (
     InstanceHandle,
     WorkloadSpec,
 )
+from .base import run_hidden
 
 _POD_TEMPLATE = """apiVersion: v1
 kind: Pod
@@ -29,34 +30,29 @@ spec:
   restartPolicy: Never
   containers:
     - name: guest
-      image: alpine:3.20
-      command: ["sleep", "infinity"]
+      image: alpine:3.19
+      command: ["sh", "-c", "trap : TERM INT; sleep infinity & wait"]
       resources:
         requests:
           cpu: "{cpu}"
           memory: "{memory}"
+          ephemeral-storage: "{disk}"
         limits:
           cpu: "{cpu}"
           memory: "{memory}"
-      volumeMounts:
-        - name: shared-disk
-          mountPath: /data
-  volumes:
-    - name: shared-disk
-      emptyDir:
-        sizeLimit: {disk}
+          ephemeral-storage: "{disk}"
 """
 
 _PHASE_STATUS = {
-    "Pending": PENDING,
     "Running": RUNNING,
+    "Pending": PENDING,
     "Succeeded": STOPPED,
     "Failed": ERROR,
     "Unknown": MISSING,
 }
 
 
-class KubernetesComputeBackend(ComputePort):
+class KubernetesAdapter(ComputePort):
     """Optional adapter. Kubernetes is a compute target, not the application architecture."""
 
     name = "kubernetes"
@@ -69,7 +65,7 @@ class KubernetesComputeBackend(ComputePort):
     def available(self) -> tuple[bool, str]:
         if not shutil.which("kubectl"):
             return False, "kubectl was not found on PATH."
-        result = subprocess.run(
+        result = run_hidden(
             ["kubectl", "cluster-info"],
             capture_output=True,
             text=True,
@@ -98,7 +94,7 @@ class KubernetesComputeBackend(ComputePort):
         )
         manifest = vm_dir / "pod.yaml"
         manifest.write_text(yaml_text, encoding="utf-8")
-        applied = subprocess.run(
+        applied = run_hidden(
             ["kubectl", "apply", "-n", self.namespace, "-f", str(manifest)],
             capture_output=True,
             text=True,
@@ -127,7 +123,7 @@ class KubernetesComputeBackend(ComputePort):
 
     def start(self, handle: InstanceHandle) -> InstanceHandle:
         try:
-            result = subprocess.run(
+            result = run_hidden(
                 [
                     "kubectl",
                     "wait",
@@ -148,7 +144,7 @@ class KubernetesComputeBackend(ComputePort):
 
     def stop(self, handle: InstanceHandle) -> InstanceHandle:
         try:
-            subprocess.run(
+            run_hidden(
                 [
                     "kubectl",
                     "--request-timeout=5s",
@@ -170,7 +166,7 @@ class KubernetesComputeBackend(ComputePort):
 
     def status(self, handle: InstanceHandle) -> InstanceHandle:
         try:
-            result = subprocess.run(
+            result = run_hidden(
                 [
                     "kubectl",
                     "--request-timeout=5s",
@@ -218,7 +214,7 @@ class KubernetesComputeBackend(ComputePort):
         pod = handle.native_id
         cmd = ["kubectl", "exec", "-n", ns, pod, "--", "sh", "-c", command]
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            res = run_hidden(cmd, capture_output=True, text=True, timeout=30)
             output = res.stdout
             if res.stderr:
                 output += ("\n" if output else "") + res.stderr
@@ -227,3 +223,6 @@ class KubernetesComputeBackend(ComputePort):
             return "Execution timed out after 30 seconds."
         except Exception as exc:
             return f"Execution error: {exc}"
+
+
+KubernetesComputeBackend = KubernetesAdapter

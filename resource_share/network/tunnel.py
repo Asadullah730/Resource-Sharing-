@@ -14,7 +14,7 @@ from typing import Callable
 CLOUDFLARED_DOWNLOAD_URL = (
     "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
 )
-TUNNEL_URL_REGEX = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+TUNNEL_URL_REGEX = re.compile(r"https://(?!(?:api|developers|pkg|blog|www)\.)[a-zA-Z0-9-]+\.trycloudflare\.com")
 
 
 class CloudflareTunnelManager:
@@ -102,9 +102,12 @@ class CloudflareTunnelManager:
 
                 # Hide console window on Windows
                 startupinfo = None
+                creationflags = 0
                 if os.name == "nt":
                     startupinfo = subprocess.STARTUPINFO()
                     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    startupinfo.wShowWindow = 0
+                    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
                 self.process = subprocess.Popen(
                     cmd,
@@ -113,25 +116,43 @@ class CloudflareTunnelManager:
                     text=True,
                     bufsize=1,
                     startupinfo=startupinfo,
+                    creationflags=creationflags,
                     encoding="utf-8",
                     errors="replace",
                 )
 
                 # Monitor output to catch the tunnel URL
                 url_found = False
+                last_error = ""
                 assert self.process.stdout is not None
                 for line in iter(self.process.stdout.readline, ""):
                     if self._stop_event.is_set():
                         break
+                    line_str = line.strip()
+                    if "error" in line_str.lower() or "failed" in line_str.lower() or "timeout" in line_str.lower():
+                        last_error = line_str
+
                     match = TUNNEL_URL_REGEX.search(line)
                     if match and not url_found:
-                        self.tunnel_url = match.group(0).strip()
+                        cand = match.group(0).strip()
+                        sub = cand.replace("https://", "").split(".trycloudflare.com")[0].lower()
+                        if sub in ("api", "developers", "pkg", "blog", "www"):
+                            continue
+                        self.tunnel_url = cand
                         url_found = True
                         self._is_starting = False
                         if status_callback:
                             status_callback("active", self.tunnel_url)
 
                 self.process.wait()
+                self.tunnel_url = None
+                self._is_starting = False
+                if not self._stop_event.is_set() and status_callback:
+                    if not url_found or self.process.returncode != 0:
+                        msg = last_error or f"Process exited with code {self.process.returncode}"
+                        status_callback(f"error: {msg}", None)
+                    else:
+                        status_callback("offline", None)
             except Exception as exc:
                 self._is_starting = False
                 self.tunnel_url = None
