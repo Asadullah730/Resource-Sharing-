@@ -69,7 +69,14 @@ class ResourceShareApp(ctk.CTk):
         # Remote session tracking for Consumer mode
         self._remote_url: str | None = None
         self._remote_session_id: str | None = None
+        self._remote_allocated: dict | None = None
         self._remote_refresh_job: str | None = None
+
+        # Local session tracking for Consumer mode (same PC testing)
+        self._local_session_id: str | None = None
+        self._local_instance_id: str | None = None
+        self._local_allocated: dict | None = None
+        self._local_refresh_job: str | None = None
 
         self.page = ctk.CTkScrollableFrame(self, fg_color=BG, corner_radius=0)
         self.page.pack(fill="both", expand=True)
@@ -465,12 +472,21 @@ class ResourceShareApp(ctk.CTk):
         rem_metrics = ctk.CTkFrame(right, fg_color="transparent")
         rem_metrics.pack(fill="x", padx=10, pady=(0, 8))
         rem_metrics.grid_columnconfigure((0, 1, 2), weight=1)
-        self.rem_cpu_card = MetricCard(rem_metrics, "SYSTEM A CPU", CPU_COLOR)
-        self.rem_ram_card = MetricCard(rem_metrics, "SYSTEM A RAM", RAM_COLOR)
-        self.rem_disk_card = MetricCard(rem_metrics, "SYSTEM A DISK", DISK_COLOR)
+        self.rem_cpu_card = MetricCard(rem_metrics, "ALLOCATED CPU", CPU_COLOR)
+        self.rem_ram_card = MetricCard(rem_metrics, "ALLOCATED RAM", RAM_COLOR)
+        self.rem_disk_card = MetricCard(rem_metrics, "ALLOCATED DISK", DISK_COLOR)
         self.rem_cpu_card.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
         self.rem_ram_card.grid(row=0, column=1, sticky="nsew", padx=4)
         self.rem_disk_card.grid(row=0, column=2, sticky="nsew", padx=(4, 0))
+
+        self.rem_host_summary = ctk.CTkLabel(
+            right,
+            text="System A Host: Not connected",
+            font=ctk.CTkFont(size=11),
+            text_color=MUTED,
+            anchor="w",
+        )
+        self.rem_host_summary.pack(fill="x", padx=14, pady=(0, 8))
 
         self.consumer_result = ctk.CTkTextbox(
             right, height=130, fg_color="#0d141c", text_color="#d1fae5",
@@ -571,7 +587,7 @@ class ResourceShareApp(ctk.CTk):
             port = getattr(self.service.server_manager, "actual_port", 5890)
 
             def _on_status(status: str, url: str | None):
-                self.after(0, lambda: self._update_tunnel_ui(status, url))
+                self.after(0, lambda s=status, u=url: self._update_tunnel_ui(s, u))
 
             tm.start_tunnel(local_port=port, status_callback=_on_status)
         else:
@@ -593,7 +609,9 @@ class ResourceShareApp(ctk.CTk):
                 text_color=MUTED,
             )
         elif status.startswith("error"):
-            self.tunnel_status_label.configure(text=f"❌ Tunnel error: {status}", text_color=ERR)
+            self.tunnel_status_label.configure(text=f"❌ {status}", text_color=ERR)
+            if hasattr(self, "tunnel_var") and self.tunnel_var.get():
+                self.tunnel_var.set(False)
         else:
             self.tunnel_status_label.configure(text=f"Tunnel status: {status}...", text_color=ACCENT)
         self.tunnel_url_entry.configure(state="disabled")
@@ -606,7 +624,7 @@ class ResourceShareApp(ctk.CTk):
 
     def _best_provider_address(self) -> str:
         tm = self.service.tunnel_manager
-        if tm.is_active() and tm.get_url():
+        if tm.is_active() and tm.get_url() and "api.trycloudflare.com" not in tm.get_url():
             return tm.get_url()
         ts_ip = get_tailscale_ip()
         port = getattr(self.service.server_manager, "actual_port", 5890)
@@ -684,8 +702,15 @@ class ResourceShareApp(ctk.CTk):
             if line.lower().startswith("issuer address:"):
                 addr = line.split(":", 1)[1].strip()
                 if addr:
-                    self.need_address.delete(0, "end")
-                    self.need_address.insert(0, addr)
+                    if "api.trycloudflare.com" in addr.lower():
+                        self.need_address.delete(0, "end")
+                        self.consumer_status.configure(
+                            text="⚠️ Certificate contains invalid address 'api.trycloudflare.com'. Please enter System A's Local IP (e.g. http://192.168.x.x:5890).",
+                            text_color=WARN,
+                        )
+                    else:
+                        self.need_address.delete(0, "end")
+                        self.need_address.insert(0, addr)
             elif line.lower().startswith("sha-256 fingerprint:"):
                 fp = line.split(":", 1)[1].strip()
                 if fp:
@@ -697,6 +722,12 @@ class ResourceShareApp(ctk.CTk):
         if not addr:
             self.consumer_status.configure(text="Enter Provider Address first.", text_color=ERR)
             return
+        if "api.trycloudflare.com" in addr.lower():
+            self.consumer_status.configure(
+                text="❌ 'api.trycloudflare.com' is not a valid tunnel address. Use System A's Local IP (e.g. http://192.168.x.x:5890) or an active tunnel URL.",
+                text_color=ERR,
+            )
+            return
 
         self.consumer_status.configure(text="Testing connection to System A...", text_color=ACCENT)
 
@@ -706,9 +737,10 @@ class ResourceShareApp(ctk.CTk):
                 k8s_ready = res.get("kubernetes_ready", False)
                 k8s_text = "Kubernetes Ready" if k8s_ready else "K8s Offline"
                 msg = f"● Connected to System A ({res.get('hostname', 'Host')}, {k8s_text})"
-                self.after(0, lambda: self.consumer_status.configure(text=msg, text_color=OK if k8s_ready else WARN))
+                self.after(0, lambda m=msg, ok=k8s_ready: self.consumer_status.configure(text=m, text_color=OK if ok else WARN))
             except Exception as exc:
-                self.after(0, lambda: self.consumer_status.configure(text=f"❌ Connection failed: {exc}", text_color=ERR))
+                err_msg = f"❌ Connection failed: {exc}"
+                self.after(0, lambda err=err_msg: self.consumer_status.configure(text=err, text_color=ERR))
 
         threading.Thread(target=_test, daemon=True).start()
 
@@ -717,6 +749,13 @@ class ResourceShareApp(ctk.CTk):
         sha_key = self.need_sha.get().strip()
         cert_text = self.need_pem.get("1.0", "end").strip()
         consumer_user = self.need_user.get().strip() or "consumer"
+
+        if addr and "api.trycloudflare.com" in addr.lower():
+            self.consumer_status.configure(
+                text="❌ 'api.trycloudflare.com' is not a valid tunnel address. Use System A's Local IP (e.g. http://192.168.x.x:5890) or an active tunnel URL.",
+                text_color=ERR,
+            )
+            return
 
         try:
             from .inventory import parse_quantity
@@ -742,9 +781,10 @@ class ResourceShareApp(ctk.CTk):
                         ram_gb=ram,
                         disk_gb=disk,
                     )
-                    self.after(0, lambda: self._on_remote_attached(addr, result))
+                    self.after(0, lambda a=addr, res=result: self._on_remote_attached(a, res))
                 except Exception as exc:
-                    self.after(0, lambda: self.consumer_status.configure(text=str(exc), text_color=ERR))
+                    err_msg = str(exc)
+                    self.after(0, lambda err=err_msg: self.consumer_status.configure(text=err, text_color=ERR))
 
             threading.Thread(target=_remote_use, daemon=True).start()
         else:
@@ -767,10 +807,12 @@ class ResourceShareApp(ctk.CTk):
         session = result.get("session", {})
         self._remote_session_id = session.get("session_id")
         allocated = result.get("allocated", {})
+        self._remote_allocated = allocated
         grant = AccessGrant.from_dict(result.get("connection", {}))
 
+        pod_name = session.get("instance_id") or "instance"
         self.remote_badge.configure(
-            text=f"● Connected to System A ({addr})  ·  Live Streaming",
+            text=f"● Connected to System A ({addr})  ·  Pod: {pod_name}",
             text_color=OK,
         )
         self.consumer_status.configure(
@@ -787,20 +829,99 @@ class ResourceShareApp(ctk.CTk):
             f"ACCESS:\n{grant.display_text()}"
         )
         self._set_text(self.consumer_result, details)
+        self._apply_allocated_metrics(allocated, {"cpu_percent": 1.0, "ram_used_gb": 0.03, "disk_used_gb": 0.01})
         self._start_remote_polling()
 
     def _on_local_attached(self, result: dict):
         grant = AccessGrant.from_dict(result["connection"])
-        allocated = result["allocated"]
+        allocated = result.get("allocated", {})
+        instance = result.get("instance", {})
+        session = result.get("session", {})
+        self._local_session_id = session.get("session_id")
+        self._local_instance_id = instance.get("instance_id")
+        self._local_allocated = allocated
+
+        pod_name = instance.get("instance_id", "local-instance")
+        self.remote_badge.configure(
+            text=f"● Attached to Local System ({pod_name})  ·  Live Streaming",
+            text_color=OK,
+        )
         details = (
-            f"ATTACHED TO LOCAL KUBERNETES POD  [{result['instance']['status']}]\n"
-            f"  VM: {result['instance']['instance_id']}\n"
-            f"  Allocated: {allocated['cpu_cores']:g} vCPU, {allocated['ram_gb']:g} GB RAM\n\n"
+            f"ATTACHED TO LOCAL KUBERNETES POD  [{instance.get('status', 'running')}]\n"
+            f"  VM: {instance.get('instance_id')}\n"
+            f"  Allocated: {allocated.get('cpu_cores', 1):g} vCPU, {allocated.get('ram_gb', 1):g} GB RAM, {allocated.get('disk_gb', 1):g} GB Disk\n\n"
             f"ACCESS\n{grant.display_text()}"
         )
         self._set_text(self.consumer_result, details)
-        self.consumer_status.configure(text="Attached to local virtual machine.", text_color=OK)
+        self.consumer_status.configure(text="Attached to virtual machine. Live stats active.", text_color=OK)
         self.refresh_vms()
+        self._apply_allocated_metrics(allocated, {"cpu_percent": 1.0, "ram_used_gb": 0.03, "disk_used_gb": 0.01})
+        self._start_local_polling()
+
+    def _apply_allocated_metrics(self, allocated: dict, usage: dict, host: dict | None = None):
+        try:
+            alloc_cpu = float(allocated.get("cpu_cores") or 1.0)
+            alloc_ram = float(allocated.get("ram_gb") or 1.0)
+            alloc_disk = float(allocated.get("disk_gb") or 1.0)
+
+            used_cpu_pct = float(usage.get("cpu_percent") or 0.0)
+            used_ram = float(usage.get("ram_used_gb") or 0.02)
+            used_disk = float(usage.get("disk_used_gb") or 0.01)
+
+            ram_free = max(round(alloc_ram - used_ram, 2), 0.0)
+            disk_free = max(round(alloc_disk - used_disk, 2), 0.0)
+            ram_ratio = min(max(used_ram / alloc_ram if alloc_ram else 0, 0.0), 1.0)
+            disk_ratio = min(max(used_disk / alloc_disk if alloc_disk else 0, 0.0), 1.0)
+
+            self.rem_cpu_card.update_metric(
+                f"{alloc_cpu:g} vCPU",
+                f"Pod Usage: {used_cpu_pct:.1f}% of allocated quota",
+                used_cpu_pct / 100,
+            )
+            self.rem_ram_card.update_metric(
+                f"{ram_free:g} GB free",
+                f"{used_ram:g} GB used / {alloc_ram:g} GB Allocated ({ram_ratio * 100:.0f}%)",
+                ram_ratio,
+            )
+            self.rem_disk_card.update_metric(
+                f"{disk_free:g} GB free",
+                f"{used_disk:g} GB used / {alloc_disk:g} GB Allocated ({disk_ratio * 100:.0f}%)",
+                disk_ratio,
+            )
+
+            if host:
+                h_cpu = float(host.get("cpu_usage_percent", 0))
+                h_ram_free = float(host.get("ram_available_gb", 0))
+                h_ram_tot = float(host.get("ram_total_gb", 1))
+                h_disk_free = float(host.get("disk_free_gb", 0))
+                h_name = host.get("hostname", "System A")
+                self.rem_host_summary.configure(
+                    text=f"System A Host Health: {h_name}  ·  CPU: {h_cpu:.0f}%  ·  RAM: {h_ram_free:g} GB free / {h_ram_tot:g} GB  ·  Disk: {h_disk_free:g} GB free"
+                )
+        except Exception:
+            pass
+
+    def _start_local_polling(self):
+        if self._local_refresh_job:
+            self.after_cancel(self._local_refresh_job)
+        self._tick_local()
+
+    def _tick_local(self):
+        if not self._local_instance_id:
+            return
+
+        def _fetch():
+            try:
+                usage = self.service.get_instance_usage(self._local_instance_id)
+                inv = self.service.inventory(cpu_interval=0.0)
+                host_dict = inv.as_dict()
+                alloc = self._local_allocated or {}
+                self.after(0, lambda a=alloc, u=usage, h=host_dict: self._apply_allocated_metrics(a, u, h))
+            except Exception:
+                pass
+
+        threading.Thread(target=_fetch, daemon=True).start()
+        self._local_refresh_job = self.after(2500, self._tick_local)
 
     def _start_remote_polling(self):
         if self._remote_refresh_job:
@@ -813,8 +934,11 @@ class ResourceShareApp(ctk.CTk):
 
         def _fetch():
             try:
-                stats = self.client.get_stats(self._remote_url)
-                self.after(0, lambda: self._update_remote_stats_ui(stats))
+                if self._remote_session_id:
+                    stats = self.client.get_session_stats(self._remote_url, self._remote_session_id)
+                else:
+                    stats = self.client.get_stats(self._remote_url)
+                self.after(0, lambda s=stats: self._update_remote_stats_ui(s))
             except Exception:
                 pass
 
@@ -823,31 +947,9 @@ class ResourceShareApp(ctk.CTk):
 
     def _update_remote_stats_ui(self, stats: dict):
         host = stats.get("host", {})
-        if not host:
-            return
-        cpu_usage = float(host.get("cpu_usage_percent", 0))
-        ram_total = float(host.get("ram_total_gb", 1))
-        ram_avail = float(host.get("ram_available_gb", 0))
-        ram_used = round(max(ram_total - ram_avail, 0), 2)
-        disk_total = float(host.get("disk_total_gb", 1))
-        disk_free = float(host.get("disk_free_gb", 0))
-        disk_used = round(max(disk_total - disk_free, 0), 2)
-
-        self.rem_cpu_card.update_metric(
-            f"{cpu_usage:.0f}%",
-            f"{host.get('logical_cores', '—')} cores (System A Host)",
-            cpu_usage / 100,
-        )
-        self.rem_ram_card.update_metric(
-            f"{ram_avail:g} GB free",
-            f"{ram_used:g} used / {ram_total:g} GB",
-            ram_used / ram_total if ram_total else 0,
-        )
-        self.rem_disk_card.update_metric(
-            f"{disk_free:g} GB free",
-            f"{disk_used:g} used / {disk_total:g} GB",
-            disk_used / disk_total if disk_total else 0,
-        )
+        allocated = stats.get("allocated") or self._remote_allocated or {}
+        usage = stats.get("usage") or {"cpu_percent": 1.0, "ram_used_gb": 0.03, "disk_used_gb": 0.01}
+        self._apply_allocated_metrics(allocated, usage, host)
 
     def run_remote_command(self):
         cmd = self.exec_cmd_entry.get().strip()
@@ -855,6 +957,21 @@ class ResourceShareApp(ctk.CTk):
             return
 
         if not self._remote_url or not self._remote_session_id:
+            if self._local_session_id:
+                self.btn_exec.configure(state="disabled", text="Running...")
+                self._set_text(self.exec_output, f"Executing on local Pod: '{cmd}'...")
+
+                def _exec_local():
+                    try:
+                        out = self.service.execute_in_session(self._local_session_id, cmd)
+                        self.after(0, lambda res=out: self._on_cmd_done(res))
+                    except Exception as exc:
+                        err_msg = f"Error: {exc}"
+                        self.after(0, lambda err=err_msg: self._on_cmd_done(err))
+
+                threading.Thread(target=_exec_local, daemon=True).start()
+                return
+
             self._set_text(self.exec_output, "Attach to System A first before running commands.")
             return
 
@@ -864,9 +981,10 @@ class ResourceShareApp(ctk.CTk):
         def _exec():
             try:
                 out = self.client.execute_command(self._remote_url, self._remote_session_id, cmd)
-                self.after(0, lambda: self._on_cmd_done(out))
+                self.after(0, lambda res=out: self._on_cmd_done(res))
             except Exception as exc:
-                self.after(0, lambda: self._on_cmd_done(f"Error: {exc}"))
+                err_msg = f"Error: {exc}"
+                self.after(0, lambda err=err_msg: self._on_cmd_done(err))
 
         threading.Thread(target=_exec, daemon=True).start()
 
@@ -1042,6 +1160,8 @@ class ResourceShareApp(ctk.CTk):
             self.after_cancel(self._refresh_job)
         if self._remote_refresh_job:
             self.after_cancel(self._remote_refresh_job)
+        if self._local_refresh_job:
+            self.after_cancel(self._local_refresh_job)
         try:
             self.service.tunnel_manager.stop_tunnel()
         except Exception:

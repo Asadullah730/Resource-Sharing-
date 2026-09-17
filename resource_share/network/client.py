@@ -53,6 +53,10 @@ class RemoteResourceClient:
         url = f"{normalize_url(base_url)}/api/stats"
         return self._request("GET", url)
 
+    def get_session_stats(self, base_url: str, session_id: str) -> dict[str, Any]:
+        url = f"{normalize_url(base_url)}/api/session/{session_id}/stats"
+        return self._request("GET", url)
+
     def use_resources(
         self,
         base_url: str,

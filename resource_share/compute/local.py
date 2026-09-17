@@ -135,10 +135,11 @@ class LocalComputeBackend(ComputePort):
 
     def execute(self, handle: InstanceHandle, command: str) -> str:
         import subprocess
+        from .base import run_hidden
 
         vm_dir = Path(handle.workspace) / "virtual-disk"
         try:
-            res = subprocess.run(
+            res = run_hidden(
                 command,
                 shell=True,
                 cwd=str(vm_dir) if vm_dir.exists() else str(handle.workspace),

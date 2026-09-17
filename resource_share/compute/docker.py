@@ -16,6 +16,7 @@ from ..ports.compute import (
     InstanceHandle,
     WorkloadSpec,
 )
+from .base import run_hidden
 
 _DOCKER_STATUS = {
     "created": CREATED,
@@ -41,7 +42,7 @@ class DockerComputeBackend(ComputePort):
         docker = shutil.which("docker")
         if not docker:
             return False, "Docker CLI was not found on PATH."
-        result = subprocess.run(
+        result = run_hidden(
             ["docker", "info"],
             capture_output=True,
             text=True,
@@ -79,7 +80,7 @@ class DockerComputeBackend(ComputePort):
             "sleep",
             "infinity",
         ]
-        created = subprocess.run(command, capture_output=True, text=True)
+        created = run_hidden(command, capture_output=True, text=True)
         if created.returncode != 0:
             raise RuntimeError(created.stderr.strip() or "docker create failed.")
         native_id = created.stdout.strip()
@@ -104,7 +105,7 @@ class DockerComputeBackend(ComputePort):
         )
 
     def start(self, handle: InstanceHandle) -> InstanceHandle:
-        result = subprocess.run(
+        result = run_hidden(
             ["docker", "start", handle.native_id],
             capture_output=True,
             text=True,
@@ -115,7 +116,7 @@ class DockerComputeBackend(ComputePort):
         return handle
 
     def stop(self, handle: InstanceHandle) -> InstanceHandle:
-        subprocess.run(
+        run_hidden(
             ["docker", "stop", handle.native_id],
             capture_output=True,
             text=True,
@@ -124,7 +125,7 @@ class DockerComputeBackend(ComputePort):
         return handle
 
     def status(self, handle: InstanceHandle) -> InstanceHandle:
-        result = subprocess.run(
+        result = run_hidden(
             ["docker", "inspect", "-f", "{{.State.Status}}", handle.native_id],
             capture_output=True,
             text=True,
@@ -148,7 +149,7 @@ class DockerComputeBackend(ComputePort):
 
     def destroy(self, handle: InstanceHandle) -> None:
         self.stop(handle)
-        subprocess.run(
+        run_hidden(
             ["docker", "rm", "-f", handle.native_id],
             capture_output=True,
             text=True,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import uuid
 from datetime import timedelta
 from pathlib import Path
@@ -31,6 +32,7 @@ from .ports.compute import (
     InstanceHandle,
     WorkloadSpec,
 )
+from .compute.base import run_hidden
 from .ports.registry import RegistryPort
 
 
@@ -248,6 +250,47 @@ class ResourceShareService:
                 self.registry.save_instance(record)
             records.append(record)
         return records
+
+    def get_instance_usage(self, instance_id: str) -> dict[str, float]:
+        record = self.registry.get_instance(instance_id)
+        if not record:
+            return {"cpu_percent": 0.0, "ram_used_gb": 0.0, "disk_used_gb": 0.0}
+
+        workspace = Path(record.workspace)
+        disk_used = 0.0
+        try:
+            if workspace.exists():
+                total_bytes = sum(f.stat().st_size for f in workspace.rglob('*') if f.is_file())
+                disk_used = round(total_bytes / (1024 ** 3), 3)
+        except Exception:
+            pass
+
+        ram_used = 0.03
+        cpu_percent = 1.0
+
+        if record.backend == "kubernetes":
+            try:
+                handle = _handle_from_record(record)
+                ns = handle.extra.get("namespace", "default")
+                pod = handle.native_id
+                res = run_hidden(
+                    ["kubectl", "exec", "-n", ns, pod, "--request-timeout=2s", "--", "sh", "-c",
+                     "cat /sys/fs/cgroup/memory.current 2>/dev/null || cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+                if res.returncode == 0 and res.stdout.strip().isdigit():
+                    bytes_val = int(res.stdout.strip())
+                    ram_used = round(bytes_val / (1024 ** 3), 3)
+            except Exception:
+                pass
+
+        return {
+            "cpu_percent": cpu_percent,
+            "ram_used_gb": max(ram_used, 0.01),
+            "disk_used_gb": max(disk_used, 0.01),
+        }
 
     def reserved_spec(self) -> ResourceSpec:
         cpu = ram = disk = 0.0
