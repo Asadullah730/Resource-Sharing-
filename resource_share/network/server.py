@@ -77,6 +77,10 @@ class ResourceShareRequestHandler(BaseHTTPRequestHandler):
             parts = path.split("/")
             session_id = parts[3]
             self._handle_session_exec(session_id, body)
+        elif path.startswith("/api/instance/") and path.endswith("/delete"):
+            parts = path.split("/")
+            instance_id = parts[3]
+            self._handle_delete_instance(instance_id)
         else:
             self._json_response(404, {"status": "error", "message": "Endpoint not found"})
 
@@ -142,12 +146,14 @@ class ResourceShareRequestHandler(BaseHTTPRequestHandler):
         cpu_text = str(req_dict.get("cpu_cores", "1"))
         ram_text = f"{req_dict.get('ram_gb', '1')} GB"
         disk_text = f"{req_dict.get('disk_gb', '10')} GB"
+        gpu_text = str(req_dict.get("gpu_count", "0"))
 
         try:
             result = service.use_resources(
                 ram_text=ram_text,
                 disk_text=disk_text,
                 cpu_text=cpu_text,
+                gpu_text=gpu_text,
                 sha_key=sha_key,
                 consumer_user=consumer_user,
                 certificate_text=cert_text,
@@ -162,6 +168,7 @@ class ResourceShareRequestHandler(BaseHTTPRequestHandler):
         inventory = service.inventory(cpu_interval=0.0)
         record = service.registry.get_instance(session.instance_id) if session else None
         allocated = record.spec.as_dict() if record else (session.requested.as_dict() if session else {})
+        requested = session.requested.as_dict() if session else allocated
         usage = service.get_instance_usage(session.instance_id) if (session and hasattr(service, "get_instance_usage")) else {"cpu_percent": 1.0, "ram_used_gb": 0.02, "disk_used_gb": 0.01}
         self._json_response(
             200,
@@ -171,6 +178,7 @@ class ResourceShareRequestHandler(BaseHTTPRequestHandler):
                 "session": session.as_dict() if session else None,
                 "instance": record.as_dict() if record else None,
                 "allocated": allocated,
+                "requested": requested,
                 "usage": usage,
             },
         )
@@ -185,6 +193,14 @@ class ResourceShareRequestHandler(BaseHTTPRequestHandler):
         try:
             output = service.execute_in_session(session_id, command)
             self._json_response(200, {"status": "ok", "output": output})
+        except Exception as exc:
+            self._json_response(500, {"status": "error", "message": str(exc)})
+
+    def _handle_delete_instance(self, instance_id: str) -> None:
+        service = self.server.service
+        try:
+            ok = service.delete_instance(instance_id)
+            self._json_response(200, {"status": "ok", "deleted": ok})
         except Exception as exc:
             self._json_response(500, {"status": "error", "message": str(exc)})
 
@@ -205,12 +221,16 @@ class ResourceShareRequestHandler(BaseHTTPRequestHandler):
 
     def _json_response(self, code: int, data: dict[str, Any]) -> None:
         payload = json.dumps(data).encode("utf-8")
-        self.send_response(code)
-        self._send_cors_headers()
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        try:
+            self.send_response(code)
+            self._send_cors_headers()
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+            # Client closed or aborted socket before response finished transmitting
+            pass
 
     def log_message(self, format: str, *args: Any) -> None:
         # Suppress noisy standard HTTP access logs

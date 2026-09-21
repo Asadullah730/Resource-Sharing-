@@ -91,12 +91,41 @@ class CloudflareTunnelManager:
                 binary = self.ensure_binary(
                     progress_callback=lambda msg: status_callback and status_callback(msg, None)
                 )
+            except Exception as exc:
+                self._is_starting = False
+                self.tunnel_url = None
+                if status_callback:
+                    status_callback(f"error: {exc}", None)
+                return
+
+            max_retries = 4
+            for attempt in range(1, max_retries + 1):
+                if self._stop_event.is_set():
+                    break
+
+                if attempt > 1:
+                    if status_callback:
+                        status_callback(
+                            f"retrying: Cloudflare API busy, retrying tunnel connection ({attempt}/{max_retries})...",
+                            None,
+                        )
+                    # Brief backoff before next attempt
+                    for _ in range(20):
+                        if self._stop_event.is_set():
+                            break
+                        time.sleep(0.1)
+                    if self._stop_event.is_set():
+                        break
 
                 cmd = [
                     str(binary),
                     "tunnel",
                     "--url",
                     f"http://127.0.0.1:{local_port}",
+                    "--edge-ip-version",
+                    "4",
+                    "--retries",
+                    "5",
                     "--no-autoupdate",
                 ]
 
@@ -109,17 +138,25 @@ class CloudflareTunnelManager:
                     startupinfo.wShowWindow = 0
                     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
-                self.process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    startupinfo=startupinfo,
-                    creationflags=creationflags,
-                    encoding="utf-8",
-                    errors="replace",
-                )
+                try:
+                    self.process = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                        startupinfo=startupinfo,
+                        creationflags=creationflags,
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                except Exception as exc:
+                    if attempt == max_retries:
+                        self._is_starting = False
+                        self.tunnel_url = None
+                        if status_callback:
+                            status_callback(f"error: {exc}", None)
+                    continue
 
                 # Monitor output to catch the tunnel URL
                 url_found = False
@@ -129,7 +166,12 @@ class CloudflareTunnelManager:
                     if self._stop_event.is_set():
                         break
                     line_str = line.strip()
-                    if "error" in line_str.lower() or "failed" in line_str.lower() or "timeout" in line_str.lower():
+                    if (
+                        "error" in line_str.lower()
+                        or "failed" in line_str.lower()
+                        or "timeout" in line_str.lower()
+                        or "context deadline" in line_str.lower()
+                    ):
                         last_error = line_str
 
                     match = TUNNEL_URL_REGEX.search(line)
@@ -144,22 +186,38 @@ class CloudflareTunnelManager:
                         if status_callback:
                             status_callback("active", self.tunnel_url)
 
-                self.process.wait()
-                self.tunnel_url = None
-                self._is_starting = False
-                if not self._stop_event.is_set() and status_callback:
-                    if not url_found or self.process.returncode != 0:
-                        msg = last_error or f"Process exited with code {self.process.returncode}"
-                        status_callback(f"error: {msg}", None)
-                    else:
+                if self.process is not None:
+                    self.process.wait()
+
+                # If URL was found, the tunnel was active and has now exited/stopped
+                if url_found:
+                    self.tunnel_url = None
+                    self._is_starting = False
+                    if not self._stop_event.is_set() and status_callback:
                         status_callback("offline", None)
-            except Exception as exc:
-                self._is_starting = False
-                self.tunnel_url = None
-                if status_callback:
-                    status_callback(f"error: {exc}", None)
-            finally:
-                self._is_starting = False
+                    break
+
+                # If user manually stopped tunnel, exit loop
+                if self._stop_event.is_set():
+                    break
+
+                # If all retries exhausted without URL, report error
+                if attempt == max_retries:
+                    self.tunnel_url = None
+                    self._is_starting = False
+                    if status_callback:
+                        clean_err = last_error or (
+                            f"Process exited with code {self.process.returncode if self.process else 'unknown'}"
+                        )
+                        if "context deadline exceeded" in clean_err:
+                            clean_err = (
+                                "Cloudflare API was busy and timed out after multiple retries. "
+                                "Try again in a moment, or connect using Local IP."
+                            )
+                        status_callback(f"error: {clean_err}", None)
+                    break
+
+            self._is_starting = False
 
         thread = threading.Thread(target=_worker, daemon=True)
         thread.start()
