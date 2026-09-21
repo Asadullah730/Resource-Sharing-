@@ -91,6 +91,42 @@ class FileRegistry(RegistryPort):
             connection=data.get("connection", {}),
         )
 
+    def delete_instance(self, instance_id: str) -> bool:
+        path = self.instances_dir / f"{instance_id}.json"
+        if path.exists():
+            path.unlink(missing_ok=True)
+            return True
+        return False
+
+    def delete_offer(self, offer_id: str) -> bool:
+        path = self.offers_dir / f"{offer_id}.json"
+        if path.exists():
+            path.unlink(missing_ok=True)
+            return True
+        return False
+
+    def delete_certificate(self, fingerprint: str) -> bool:
+        removed = False
+        fp = fingerprint.strip().lower()
+        for ext in (".json", ".pem"):
+            path = self.certs_dir / f"{fp}{ext}"
+            if path.exists():
+                path.unlink(missing_ok=True)
+                removed = True
+        return removed
+
+    def delete_sessions_for_instance(self, instance_id: str) -> int:
+        count = 0
+        for path in self.sessions_dir.glob("*.json"):
+            try:
+                data = _read_json(path)
+                if data.get("instance_id") == instance_id:
+                    path.unlink(missing_ok=True)
+                    count += 1
+            except Exception:
+                pass
+        return count
+
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
