@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import uuid
 from datetime import timedelta
@@ -34,6 +35,22 @@ from .ports.compute import (
 )
 from .compute.base import run_hidden
 from .ports.registry import RegistryPort
+
+
+def _parse_gpu_count(text: str | int | None) -> int:
+    """Parse GPU count. Defaults to 0 if empty or invalid."""
+    if text is None:
+        return 0
+    if isinstance(text, int):
+        return max(text, 0)
+    cleaned = str(text).strip()
+    if not cleaned or cleaned == "0":
+        return 0
+    try:
+        val = int(parse_quantity(cleaned))
+        return max(val, 0)
+    except Exception:
+        return 0
 
 
 class ResourceShareService:
@@ -70,6 +87,7 @@ class ResourceShareService:
         ram_text: str,
         disk_text: str,
         cpu_text: str,
+        gpu_text: str = "0",
         target_user: str,
         provider_user: str = "",
         purpose: str = "shared-vm",
@@ -88,6 +106,7 @@ class ResourceShareService:
             cpu_cores=parse_quantity(cpu_text),
             ram_gb=parse_quantity(ram_text),
             disk_gb=parse_quantity(disk_text),
+            gpu_count=_parse_gpu_count(gpu_text),
         )
         self._validate_against_host(allocated, host)
 
@@ -180,6 +199,7 @@ class ResourceShareService:
         ram_text: str,
         disk_text: str,
         cpu_text: str,
+        gpu_text: str = "0",
         sha_key: str,
         consumer_user: str,
         certificate_text: str = "",
@@ -188,6 +208,7 @@ class ResourceShareService:
             cpu_cores=parse_quantity(cpu_text),
             ram_gb=parse_quantity(ram_text),
             disk_gb=parse_quantity(disk_text),
+            gpu_count=_parse_gpu_count(gpu_text),
         )
         cert = self._resolve_certificate(sha_key, certificate_text)
         verify_certificate(cert, self.secret)
@@ -251,6 +272,53 @@ class ResourceShareService:
             records.append(record)
         return records
 
+    def delete_instance(self, instance_id: str) -> bool:
+        """Completely delete a virtual machine/workload and all associated data."""
+        record = self.registry.get_instance(instance_id)
+        deleted = False
+
+        if record is not None:
+            # 1. Terminate pod / container in compute backend
+            try:
+                handle = _handle_from_record(record)
+                self.compute.destroy(handle)
+            except Exception:
+                pass
+
+            # 2. Remove workspace folder on disk
+            if record.workspace:
+                try:
+                    ws = Path(record.workspace)
+                    if ws.exists():
+                        shutil.rmtree(ws, ignore_errors=True)
+                except Exception:
+                    pass
+
+            # 3. Remove associated share offer, certificate, and active sessions
+            if record.offer_id:
+                self.registry.delete_offer(record.offer_id)
+            if record.fingerprint:
+                self.registry.delete_certificate(record.fingerprint)
+            self.registry.delete_sessions_for_instance(instance_id)
+
+            # 4. Remove instance record
+            deleted = self.registry.delete_instance(instance_id)
+
+        # Fallback cleanup for orphaned runtime directories
+        try:
+            runtime_dir = self.data_root / "vm-runtime" / instance_id
+            if runtime_dir.exists():
+                shutil.rmtree(runtime_dir, ignore_errors=True)
+                deleted = True
+        except Exception:
+            pass
+
+        # Also remove if only instance json existed
+        if not deleted:
+            deleted = self.registry.delete_instance(instance_id)
+
+        return deleted
+
     def get_instance_usage(self, instance_id: str) -> dict[str, float]:
         record = self.registry.get_instance(instance_id)
         if not record:
@@ -273,16 +341,47 @@ class ResourceShareService:
                 handle = _handle_from_record(record)
                 ns = handle.extra.get("namespace", "default")
                 pod = handle.native_id
+                probe_cmd = (
+                    "cat /sys/fs/cgroup/memory.current 2>/dev/null || cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null; "
+                    "echo '---CPU---'; "
+                    "top -b -n 1 2>/dev/null | head -n 4; "
+                    "echo '---DISK---'; "
+                    "du -sk /root /tmp /home 2>/dev/null"
+                )
                 res = run_hidden(
-                    ["kubectl", "exec", "-n", ns, pod, "--request-timeout=2s", "--", "sh", "-c",
-                     "cat /sys/fs/cgroup/memory.current 2>/dev/null || cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null"],
+                    ["kubectl", "exec", "-n", ns, pod, "--request-timeout=2s", "--", "sh", "-c", probe_cmd],
                     capture_output=True,
                     text=True,
                     timeout=3,
                 )
-                if res.returncode == 0 and res.stdout.strip().isdigit():
-                    bytes_val = int(res.stdout.strip())
-                    ram_used = round(bytes_val / (1024 ** 3), 3)
+                if res.returncode == 0 and res.stdout:
+                    parts = res.stdout.split("---CPU---")
+                    ram_part = parts[0].strip()
+                    if ram_part.isdigit():
+                        ram_used = round(int(ram_part) / (1024 ** 3), 3)
+
+                    if len(parts) > 1:
+                        cpu_disk = parts[1].split("---DISK---")
+                        for line in cpu_disk[0].splitlines():
+                            if "CPU:" in line and "idle" in line:
+                                import re
+                                m_idle = re.search(r"(\d+)%\s*idle", line)
+                                if m_idle:
+                                    cpu_percent = float(100 - int(m_idle.group(1)))
+                                else:
+                                    m_usr = re.search(r"(\d+)%\s*usr", line)
+                                    m_sys = re.search(r"(\d+)%\s*sys", line)
+                                    if m_usr or m_sys:
+                                        cpu_percent = float((int(m_usr.group(1)) if m_usr else 0) + (int(m_sys.group(1)) if m_sys else 0))
+
+                        if len(cpu_disk) > 1:
+                            total_kb = sum(
+                                int(l.split()[0])
+                                for l in cpu_disk[1].strip().splitlines()
+                                if l.split() and l.split()[0].isdigit()
+                            )
+                            if total_kb > 0:
+                                disk_used = round(total_kb / (1024 ** 2), 3)
             except Exception:
                 pass
 
@@ -294,19 +393,27 @@ class ResourceShareService:
 
     def reserved_spec(self) -> ResourceSpec:
         cpu = ram = disk = 0.0
+        gpu = 0
         for record in self.list_instances():
             if record.status in INACTIVE_STATUSES:
                 continue
             cpu += record.spec.cpu_cores
             ram += record.spec.ram_gb
             disk += record.spec.disk_gb
-        return ResourceSpec(cpu_cores=round(cpu, 2), ram_gb=round(ram, 2), disk_gb=round(disk, 2))
+            gpu += getattr(record.spec, "gpu_count", 0)
+        return ResourceSpec(
+            cpu_cores=round(cpu, 2),
+            ram_gb=round(ram, 2),
+            disk_gb=round(disk, 2),
+            gpu_count=gpu,
+        )
 
     def remaining_shareable(self, host: HostInventory) -> ResourceSpec:
         capacity = ResourceSpec(
             cpu_cores=float(host.logical_cores),
             ram_gb=host.ram_available_gb,
             disk_gb=host.disk_free_gb,
+            gpu_count=getattr(host, "gpu_count", 0),
         )
         return capacity.remaining_after(self.reserved_spec())
 
@@ -322,6 +429,7 @@ class ResourceShareService:
             "vcpu": record.spec.cpu_cores,
             "memory_gb": record.spec.ram_gb,
             "disk_gb": record.spec.disk_gb,
+            "gpu": getattr(record.spec, "gpu_count", 0),
             "cpu_usage_percent": 0.0,
             "ram_used_gb": 0.0,
             "disk_used_gb": 0.0,
@@ -372,6 +480,10 @@ class ResourceShareService:
         if allocated.disk_gb > remaining.disk_gb:
             raise ValueError(
                 f"Cannot share {allocated.disk_gb:g} GB disk; only {remaining.disk_gb:g} GB remain.{extra}"
+            )
+        if allocated.gpu_count > remaining.gpu_count:
+            raise ValueError(
+                f"Cannot share {allocated.gpu_count} GPUs; only {remaining.gpu_count} remain.{extra}"
             )
 
 

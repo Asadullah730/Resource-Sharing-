@@ -135,23 +135,26 @@ class LocalComputeBackend(ComputePort):
 
     def execute(self, handle: InstanceHandle, command: str) -> str:
         import subprocess
+        import sys
         from .base import run_hidden
 
+        py = sys.executable
         vm_dir = Path(handle.workspace) / "virtual-disk"
         try:
             res = run_hidden(
-                command,
-                shell=True,
+                [str(py), "-c", command],
                 cwd=str(vm_dir) if vm_dir.exists() else str(handle.workspace),
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=120,
             )
-            output = res.stdout
-            if res.stderr:
-                output += ("\n" if output else "") + res.stderr
-            return output or f"(completed with exit code {res.returncode})"
+            stdout = res.stdout or ""
+            stderr = res.stderr or ""
+            output = stdout
+            if stderr:
+                output = f"{output}\n{stderr}" if output else stderr
+            return output.strip() or f"(completed with exit code {res.returncode})"
         except subprocess.TimeoutExpired:
-            return "Execution timed out after 30 seconds."
+            return "Execution timed out after 120 seconds."
         except Exception as exc:
             return f"Execution error: {exc}"
