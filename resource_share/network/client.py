@@ -6,12 +6,20 @@ import urllib.request
 from typing import Any
 
 
+import re
+
+
 def normalize_url(raw: str) -> str:
-    url = raw.strip().rstrip("/")
+    url = raw.strip().rstrip("/").rstrip(":")
     if not url:
         return ""
     if not (url.startswith("http://") or url.startswith("https://")):
         url = f"http://{url}"
+    # Cloudflare Quick Tunnels (*.trycloudflare.com) only listen on standard HTTPS (port 443/80).
+    # If a user accidentally appends :5890 or a colon to trycloudflare.com, strip it so the connection doesn't time out.
+    if "trycloudflare.com" in url.lower():
+        url = re.sub(r"(trycloudflare\.com)(?::\d+|:?)", r"\1", url, flags=re.IGNORECASE)
+    url = url.rstrip("/").rstrip(":")
     return url
 
 
@@ -21,7 +29,13 @@ class RemoteResourceClient:
     def __init__(self, timeout: float = 8.0):
         self.timeout = timeout
 
-    def _request(self, method: str, url: str, data: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _request(
+        self,
+        method: str,
+        url: str,
+        data: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
         req_data = None
         headers = {"User-Agent": "ResourceShare-Client/1.0"}
         if data is not None:
@@ -29,8 +43,9 @@ class RemoteResourceClient:
             headers["Content-Type"] = "application/json"
 
         req = urllib.request.Request(url, data=req_data, headers=headers, method=method)
+        t = timeout or self.timeout
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as response:
+            with urllib.request.urlopen(req, timeout=t) as response:
                 content = response.read().decode("utf-8")
                 return json.loads(content)
         except urllib.error.HTTPError as exc:
@@ -67,6 +82,7 @@ class RemoteResourceClient:
         cpu_cores: float,
         ram_gb: float,
         disk_gb: float,
+        gpu_count: int = 0,
     ) -> dict[str, Any]:
         url = f"{normalize_url(base_url)}/api/use"
         payload = {
@@ -77,16 +93,17 @@ class RemoteResourceClient:
                 "cpu_cores": cpu_cores,
                 "ram_gb": ram_gb,
                 "disk_gb": disk_gb,
+                "gpu_count": gpu_count,
             },
         }
-        res = self._request("POST", url, payload)
+        res = self._request("POST", url, payload, timeout=35.0)
         if res.get("status") == "ok":
             return res.get("data", {})
         raise RuntimeError(res.get("message", "Failed to use resources"))
 
     def execute_command(self, base_url: str, session_id: str, command: str) -> str:
         url = f"{normalize_url(base_url)}/api/session/{session_id}/exec"
-        res = self._request("POST", url, {"command": command})
+        res = self._request("POST", url, {"command": command}, timeout=130.0)
         if res.get("status") == "ok":
             return str(res.get("output", ""))
         raise RuntimeError(res.get("message", "Command execution failed"))

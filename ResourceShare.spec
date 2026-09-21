@@ -4,6 +4,20 @@ from PyInstaller.utils.hooks import collect_all
 datas = []
 binaries = []
 hiddenimports = [
+    'psutil',
+    'customtkinter',
+    'resource_share',
+    'resource_share.ui',
+    'resource_share.service',
+    'resource_share.inventory',
+    'resource_share.models',
+    'resource_share.certificate',
+    'resource_share.matching',
+    'resource_share.bootstrap',
+    'resource_share.components',
+    'resource_share.compute',
+    'resource_share.compute.base',
+    'resource_share.compute.factory',
     'resource_share.compute.local',
     'resource_share.compute.docker',
     'resource_share.compute.kubernetes',
@@ -11,9 +25,15 @@ hiddenimports = [
     'resource_share.network.server',
     'resource_share.network.client',
     'resource_share.network.tunnel',
+    'resource_share.ports',
 ]
-tmp_ret = collect_all('customtkinter')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+
+tmp_ctk = collect_all('customtkinter')
+datas += tmp_ctk[0]; binaries += tmp_ctk[1]; hiddenimports += tmp_ctk[2]
+
+tmp_rs = collect_all('resource_share')
+datas += tmp_rs[0]; binaries += tmp_rs[1]; hiddenimports += tmp_rs[2]
+
 
 
 a = Analysis(

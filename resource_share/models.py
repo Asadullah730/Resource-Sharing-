@@ -20,8 +20,9 @@ class ResourceSpec:
     cpu_cores: float
     ram_gb: float
     disk_gb: float
+    gpu_count: int = 0
 
-    def as_dict(self) -> dict[str, float]:
+    def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     def fits_inside(self, other: ResourceSpec) -> bool:
@@ -29,16 +30,19 @@ class ResourceSpec:
             self.cpu_cores <= other.cpu_cores
             and self.ram_gb <= other.ram_gb
             and self.disk_gb <= other.disk_gb
+            and self.gpu_count <= other.gpu_count
         )
 
     def label(self) -> str:
-        return f"{self.cpu_cores:g} CPU, {self.ram_gb:g} GB RAM, {self.disk_gb:g} GB disk"
+        gpu_str = f", {self.gpu_count} GPU" if self.gpu_count > 0 else ""
+        return f"{self.cpu_cores:g} CPU, {self.ram_gb:g} GB RAM, {self.disk_gb:g} GB disk{gpu_str}"
 
     def remaining_after(self, reserved: ResourceSpec) -> ResourceSpec:
         return ResourceSpec(
             cpu_cores=round(max(self.cpu_cores - reserved.cpu_cores, 0), 2),
             ram_gb=round(max(self.ram_gb - reserved.ram_gb, 0), 2),
             disk_gb=round(max(self.disk_gb - reserved.disk_gb, 0), 2),
+            gpu_count=max(self.gpu_count - reserved.gpu_count, 0),
         )
 
 
@@ -59,6 +63,9 @@ class HostInventory:
     username: str = ""
     ram_percent: float = 0.0
     disk_percent: float = 0.0
+    gpu_name: str = ""
+    gpu_count: int = 0
+    gpu_vram_gb: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

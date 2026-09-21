@@ -74,12 +74,17 @@ class DockerComputeBackend(ComputePort):
             str(cpus),
             "--memory",
             memory,
+        ]
+        gpu_cnt = getattr(workload.spec, "gpu_count", 0)
+        if gpu_cnt > 0:
+            command.extend(["--gpus", f"count={gpu_cnt}"])
+        command.extend([
             "-v",
             f"{disk_dir}:/data",
-            "alpine:3.20",
+            "python:3.11-alpine",
             "sleep",
             "infinity",
-        ]
+        ])
         created = run_hidden(command, capture_output=True, text=True)
         if created.returncode != 0:
             raise RuntimeError(created.stderr.strip() or "docker create failed.")

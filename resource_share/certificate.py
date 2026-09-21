@@ -129,6 +129,7 @@ def certificate_from_dict(data: dict) -> ShareCertificate:
             cpu_cores=float(allocated["cpu_cores"]),
             ram_gb=float(allocated["ram_gb"]),
             disk_gb=float(allocated["disk_gb"]),
+            gpu_count=int(allocated.get("gpu_count", 0)),
         ),
         issued_at=data["issued_at"],
         expires_at=data["expires_at"],
