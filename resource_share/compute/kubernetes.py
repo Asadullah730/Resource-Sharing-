@@ -30,17 +30,17 @@ spec:
   restartPolicy: Never
   containers:
     - name: guest
-      image: alpine:3.19
+      image: python:3.11-alpine
       command: ["sh", "-c", "trap : TERM INT; sleep infinity & wait"]
       resources:
         requests:
           cpu: "{cpu}"
           memory: "{memory}"
-          ephemeral-storage: "{disk}"
+          ephemeral-storage: "{disk}"{gpu_request}
         limits:
           cpu: "{cpu}"
           memory: "{memory}"
-          ephemeral-storage: "{disk}"
+          ephemeral-storage: "{disk}"{gpu_limit}
 """
 
 _PHASE_STATUS = {
@@ -75,6 +75,20 @@ class KubernetesAdapter(ComputePort):
             return False, "kubectl is installed but no cluster is reachable."
         return True, "Kubernetes cluster is reachable via kubectl."
 
+    def _cluster_has_nvidia_gpu(self) -> bool:
+        """Check if any node in the Kubernetes cluster has allocatable nvidia.com/gpu."""
+        try:
+            res = run_hidden(
+                ["kubectl", "get", "nodes", "-o", "jsonpath={.items[*].status.allocatable['nvidia\\.com/gpu']}"],
+                capture_output=True,
+                text=True,
+                timeout=6,
+            )
+            val = res.stdout.strip()
+            return bool(val and any(int(x) > 0 for x in val.split() if x.isdigit()))
+        except Exception:
+            return False
+
     def create_instance(self, workload: WorkloadSpec) -> InstanceHandle:
         ok, reason = self.available()
         if not ok:
@@ -85,12 +99,24 @@ class KubernetesAdapter(ComputePort):
         name = f"rs-{workload.name}".replace("_", "-").lower()[:40]
         memory = f"{max(int(workload.spec.ram_gb * 1024), 128)}Mi"
         disk = f"{max(int(workload.spec.disk_gb), 1)}Gi"
+        gpu_cnt = getattr(workload.spec, "gpu_count", 0)
+        gpu_entry = ""
+        if gpu_cnt > 0:
+            if self._cluster_has_nvidia_gpu():
+                gpu_entry = f'\n          nvidia.com/gpu: "{gpu_cnt}"'
+            else:
+                # Node has no nvidia.com/gpu plugin (e.g. Intel Iris Xe / standard Docker Desktop).
+                # Omitting nvidia.com/gpu limit prevents the Pod from getting permanently stuck in Pending.
+                pass
+
         yaml_text = _POD_TEMPLATE.format(
             name=name,
             offer=workload.labels.get("offer_id", "none"),
             cpu=str(workload.spec.cpu_cores),
             memory=memory,
             disk=disk,
+            gpu_request=gpu_entry,
+            gpu_limit=gpu_entry,
         )
         manifest = vm_dir / "pod.yaml"
         manifest.write_text(yaml_text, encoding="utf-8")
@@ -131,15 +157,37 @@ class KubernetesAdapter(ComputePort):
                     f"pod/{handle.native_id}",
                     "-n",
                     handle.extra.get("namespace", self.namespace),
-                    "--timeout=60s",
+                    "--timeout=15s",
                 ],
                 capture_output=True,
                 text=True,
-                timeout=65,
+                timeout=18,
             )
-            handle.status = RUNNING if result.returncode == 0 else PENDING
-        except (subprocess.TimeoutExpired, Exception):
+            if result.returncode == 0:
+                handle.status = RUNNING
+            else:
+                # Fast diagnostic if pod could not start
+                desc = run_hidden(
+                    ["kubectl", "describe", "pod", handle.native_id, "-n", handle.extra.get("namespace", self.namespace)],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                diag = desc.stdout or ""
+                reason = "Pod not Ready in 15s"
+                if "Insufficient nvidia.com/gpu" in diag:
+                    reason = "Node lacks nvidia.com/gpu resource"
+                elif "FailedScheduling" in diag:
+                    reason = "Failed scheduling on Kubernetes node"
+                elif "ImagePullBackOff" in diag or "ErrImagePull" in diag:
+                    reason = "Container image pull failed"
+                handle.status = ERROR
+                raise RuntimeError(f"Kubernetes Pod {handle.native_id} failed to start ({reason}).")
+        except Exception as exc:
             handle.status = ERROR
+            if isinstance(exc, RuntimeError):
+                raise
+            raise RuntimeError(f"Failed to start pod {handle.native_id}: {exc}") from exc
         return handle
 
     def stop(self, handle: InstanceHandle) -> InstanceHandle:
@@ -214,13 +262,15 @@ class KubernetesAdapter(ComputePort):
         pod = handle.native_id
         cmd = ["kubectl", "exec", "-n", ns, pod, "--", "sh", "-c", command]
         try:
-            res = run_hidden(cmd, capture_output=True, text=True, timeout=30)
-            output = res.stdout
-            if res.stderr:
-                output += ("\n" if output else "") + res.stderr
-            return output or f"(command completed with exit code {res.returncode})"
+            res = run_hidden(cmd, capture_output=True, text=True, timeout=120)
+            stdout = res.stdout or ""
+            stderr = res.stderr or ""
+            output = stdout
+            if stderr:
+                output = f"{output}\n{stderr}" if output else stderr
+            return output.strip() or f"(command completed with exit code {res.returncode})"
         except subprocess.TimeoutExpired:
-            return "Execution timed out after 30 seconds."
+            return "Execution timed out after 120 seconds."
         except Exception as exc:
             return f"Execution error: {exc}"
 

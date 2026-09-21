@@ -44,3 +44,19 @@ class RegistryPort(ABC):
     @abstractmethod
     def save_session(self, session: AccessSession) -> Path:
         ...
+
+    @abstractmethod
+    def delete_instance(self, instance_id: str) -> bool:
+        ...
+
+    @abstractmethod
+    def delete_offer(self, offer_id: str) -> bool:
+        ...
+
+    @abstractmethod
+    def delete_certificate(self, fingerprint: str) -> bool:
+        ...
+
+    @abstractmethod
+    def delete_sessions_for_instance(self, instance_id: str) -> int:
+        ...
